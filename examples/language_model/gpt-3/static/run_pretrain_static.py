@@ -111,7 +111,7 @@ def dist_optimizer(args, topo):
     if args.pp_degree > 1:
         dist_strategy.pipeline_configs = {
             "schedule_mode": "1F1B",
-            "micro_micro_batch_size": micro_batch_size,
+            "micro_batch_size": micro_batch_size,
             "accumulate_steps": acc_steps,
         }
     else:
@@ -188,7 +188,11 @@ def run_evaluate(data_loader,
 def do_train(args):
     # Initialize the paddle and paddle fleet execute environment
     paddle.enable_static()
-    fleet.init(is_collective=True)
+
+    worker_num = paddle.distributed.get_world_size()
+    worker_index = paddle.distributed.get_rank()
+
+    #fleet.init(is_collective=True)
 
     # Create the random seed for the worker
     random.seed(args.seed)
@@ -196,7 +200,9 @@ def do_train(args):
     paddle.seed(args.seed)
     get_rng_state_tracker().add('global_seed', args.seed)
     get_rng_state_tracker().add('local_seed',
-                                args.seed + fleet.worker_index() + 2021)
+                                args.seed + worker_index + 2021)
+    #get_rng_state_tracker().add('local_seed',
+    #                            args.seed + fleet.worker_index() + 2021)
 
     if args.use_amp and args.amp_level == "O2":
         assert (args.mp_degree == 1 and args.pp_degree == 1
@@ -209,9 +215,9 @@ def do_train(args):
     ], "Invalid device! Available device should be cpu, gpu, or xpu."
     place = paddle.set_device(args.device)
 
-    worker_num = fleet.worker_num()
-    worker_index = fleet.worker_index()
-    local_rank = 0 if fleet.local_rank() is None else int(fleet.local_rank())
+    #worker_num = fleet.worker_num()
+    #worker_index = fleet.worker_index()
+    #local_rank = 0 if fleet.local_rank() is None else int(fleet.local_rank())
 
     topo = Topology(
         device_rank=worker_index,
@@ -224,6 +230,8 @@ def do_train(args):
     logger.info("The topo of hybrid parallelism:\n{}".format(topo))
 
     dist_strategy = dist_optimizer(args, topo)
+    fleet.init(is_collective=True, strategy=dist_strategy)
+    local_rank = 0 if fleet.local_rank() is None else int(fleet.local_rank())
 
     # Create log write, train results show on last card of pipeline.
     if topo.is_last:
@@ -256,6 +264,7 @@ def do_train(args):
                     args.model_name_or_path)
                 eos_id = tokenizer.eos_token_id
 
+                print("---------------------data_word_sie, data_word_rank")
                 train_data_loader, valid_data_loader, test_data_loader = create_pretrained_dataset(
                     args,
                     data_file,
@@ -266,7 +275,7 @@ def do_train(args):
                     max_seq_len=args.max_seq_len,
                     places=paddle.static.cuda_places(),
                     data_holders=data_holders,
-                    pipeline_mode=False, )
+                    pipeline_mode=True, )
 
                 if args.model_name_or_path in pretrained_models_list:
                     model_config = model_class.pretrained_init_configuration[
@@ -316,16 +325,22 @@ def do_train(args):
                 p.name for n, p in model.named_parameters()
                 if not any(nd in n for nd in ["bias", "norm"])
             ]
-            optimizer = paddle.optimizer.AdamW(
+            optimizer = paddle.optimizer.Adam(
                 learning_rate=lr_scheduler,
                 beta1=args.adam_beta1,
                 beta2=args.adam_beta2,
                 epsilon=args.adam_epsilon,
-                grad_clip=clip,
-                weight_decay=args.weight_decay,
-                apply_decay_param_fun=lambda x: x in decay_param)
-            # alias
-            optimizer.apply_optimize = optimizer._apply_optimize
+                grad_clip=clip)
+            #optimizer = paddle.optimizer.AdamW(
+            #    learning_rate=lr_scheduler,
+            #    beta1=args.adam_beta1,
+            #    beta2=args.adam_beta2,
+            #    epsilon=args.adam_epsilon,
+            #    grad_clip=clip,
+            #    weight_decay=args.weight_decay,
+            #    apply_decay_param_fun=lambda x: x in decay_param)
+            ## alias
+            #optimizer.apply_optimize = optimizer._apply_optimize
 
             if args.use_recompute:
                 dist_strategy.recompute = True
@@ -394,32 +409,47 @@ def do_train(args):
             logger.error("No checkpoint load.")
 
     global_step = 0
+    step = 0
     tic_train = time.time()
     epoch = 0
     learning_rate = main_program.global_block().vars["learning_rate_0"]
+
+    ## config fleet executor
+    #main_program._pipeline_opt['fleet_opt'] = {
+    #   'dist_strategy': dist_strategy.sharding_configs,
+    #   "num_micro_batches": dist_strategy.pipeline_configs["accumulate_steps"],
+    #   'scheduler': '1F1B'
+    #}
+
     while True:
+        train_data_loader.start()
         fetchs = []
         if topo.is_last:
             fetchs = [loss, learning_rate]
 
         # Bug fix, if not call valid_data_loader, the enumerate will call valid_data_loader
         # many times. and start a new random dataloader.
-        valid_data_loader = valid_data_loader()
-        test_data_loader = test_data_loader()
+        #valid_data_loader = valid_data_loader()
+        #test_data_loader = test_data_loader()
 
         train_reader_cost = 0.0
         train_run_cost = 0.0
         reader_start = time.time()
-        for step, batch in enumerate(train_data_loader()):
+        #for step, batch in enumerate(train_data_loader()):
+        while True:
             train_reader_cost += time.time() - reader_start
             train_start = time.time()
 
             global_step += 1
+            step += 1
 
             ret = exe.run(main_program,
-                          feed=batch,
                           fetch_list=fetchs,
                           use_program_cache=True)
+            #ret = exe.run(main_program,
+            #              feed=batch,
+            #              fetch_list=fetchs,
+            #              use_program_cache=True)
             # In the new 2.0 api, must call this function to change the learning_rate
             lr_scheduler.step()
             train_run_cost += time.time() - train_start
@@ -460,9 +490,9 @@ def do_train(args):
                 if topo.is_last:
                     eval_fetch = [loss]
 
-                run_evaluate(valid_data_loader, exe, test_program,
-                             args.eval_iters, log_writer, global_step, args,
-                             epoch, topo.is_last, eval_fetch, "valid")
+                #run_evaluate(valid_data_loader, exe, test_program,
+                #             args.eval_iters, log_writer, global_step, args,
+                #             epoch, topo.is_last, eval_fetch, "valid")
                 tic_train = time.time()
 
             if global_step % args.save_steps == 0 or global_step >= args.max_steps:
@@ -484,9 +514,9 @@ def do_train(args):
                 if topo.is_last:
                     eval_fetch = [loss]
 
-                run_evaluate(test_data_loader, exe, test_program,
-                             args.test_iters, log_writer, global_step, args,
-                             epoch, topo.is_last, eval_fetch, "test")
+                #run_evaluate(test_data_loader, exe, test_program,
+                #             args.test_iters, log_writer, global_step, args,
+                #             epoch, topo.is_last, eval_fetch, "test")
                 del train_data_loader
                 return
             reader_start = time.time()

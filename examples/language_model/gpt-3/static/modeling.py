@@ -764,7 +764,9 @@ class GPTForPretraining(GPTPretrainedModel):
     def __init__(self, gpt):
         super(GPTForPretraining, self).__init__()
         self.gpt = gpt
-        self.apply(self.init_weights)
+        self.weight = self.gpt.embeddings.word_embeddings.weight
+        self.weight = self.create_parameter(shape=self.weight.shape)
+        #self.apply(self.init_weights)
 
     def parallel_matmul(self, lm_output, logit_weights, parallel_output, topo):
         if topo is not None and topo.mp_info.size > 1:
@@ -798,8 +800,11 @@ class GPTForPretraining(GPTPretrainedModel):
             encoder_outputs, cached_kvs = outputs[:2]
         else:
             encoder_outputs = outputs
+        #logits = self.parallel_matmul(
+        #    encoder_outputs, self.gpt.embeddings.word_embeddings.weight, True,
+        #    self.gpt.topo)
         logits = self.parallel_matmul(
-            encoder_outputs, self.gpt.embeddings.word_embeddings.weight, True,
+            encoder_outputs, self.weight, True,
             self.gpt.topo)
 
         if use_cache:
@@ -820,7 +825,8 @@ class GPTPretrainingCriterion(paddle.nn.Layer):
         if topo is None or topo.mp_info.size == 1:
             self.loss_func = paddle.nn.CrossEntropyLoss(reduction="none")
         else:
-            self.loss_func = paddle.distributed.collective._c_softmax_with_cross_entropy
+            self.loss_func = paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
+            #self.loss_func = paddle.distributed.collective._c_softmax_with_cross_entropy
 
     def forward(self, prediction_scores, masked_lm_labels, loss_mask):
         masked_lm_loss = self.loss_func(prediction_scores,

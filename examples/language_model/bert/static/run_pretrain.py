@@ -351,7 +351,8 @@ def do_train(args):
     global_step = 0
     tic_train = time.time()
     epoch = 0
-    while True:
+    #while True:
+    for epoch in range(0, 10):
         files = [
             os.path.join(args.input_dir, f) for f in os.listdir(args.input_dir)
             if os.path.isfile(os.path.join(args.input_dir, f)) and "training" in
@@ -360,7 +361,7 @@ def do_train(args):
         files.sort()
         num_files = len(files)
         random.Random(args.seed + epoch).shuffle(files)
-        f_start_id = 0
+        f_start_id = -1 
 
         # Select one file for each worker and create the DataLoader for the file
         data_file = select_dataset_file_for_each_worker(
@@ -376,7 +377,6 @@ def do_train(args):
                                          args.max_predictions_per_seq, args,
                                          data_holders, worker_init,
                                          paddle.static.cuda_places())
-
             train_cost_avg = TimeCostAverage()
             reader_cost_avg = TimeCostAverage()
             total_samples = 0
