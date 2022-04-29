@@ -75,7 +75,7 @@ def dist_optimizer(args, topo):
 
     exec_strategy = paddle.fluid.ExecutionStrategy()
     exec_strategy.num_threads = 2
-    exec_strategy.num_iteration_per_drop_scope = 1
+    exec_strategy.num_iteration_per_drop_scope = 100
 
     dist_strategy = fleet.DistributedStrategy()
     dist_strategy.execution_strategy = exec_strategy
@@ -99,15 +99,20 @@ def dist_optimizer(args, topo):
             "use_fp16_guard": False
         }
     if args.use_sharding:
-        dist_strategy.sharding = True
-        dist_strategy.sharding_configs = {
-            "segment_broadcast_MB": 32,
-            "sharding_degree": args.sharding_degree,
-            "mp_degree": args.mp_degree,
-            "pp_degree": args.pp_degree,
-            "dp_degree": args.dp_degree,
-            "optimize_offload": False,
-        }
+        if args.mp_degree > 1 and args.dp_degree > 1 and \
+                args.pp_degree == 1 and args.sharding_degree == 1:
+            dist_strategy.tensor_parallel = True
+            dist_strategy.tensor_parallel_configs = {"tensor_parallel_degree": args.mp_degree}
+        else:
+            dist_strategy.sharding = True
+            dist_strategy.sharding_configs = {
+                "segment_broadcast_MB": 32,
+                "sharding_degree": args.sharding_degree,
+                "mp_degree": args.mp_degree,
+                "pp_degree": args.pp_degree,
+                "dp_degree": args.dp_degree,
+                "optimize_offload": False,
+            }
     if args.pp_degree > 1:
         dist_strategy.pipeline_configs = {
             "schedule_mode": "1F1B",
@@ -169,8 +174,8 @@ def run_evaluate(data_loader,
 
     for eval_step, batch in enumerate(data_loader):
         loss_return = exe.run(program, feed=batch, fetch_list=eval_fetch)
-        if is_last:
-            all_loss.append(float(loss_return[0]))
+        #if is_last:
+        #    all_loss.append(float(loss_return[0]))
         if eval_step >= iter_steps - 1:
             if not is_last:
                 break
@@ -325,22 +330,22 @@ def do_train(args):
                 p.name for n, p in model.named_parameters()
                 if not any(nd in n for nd in ["bias", "norm"])
             ]
-            optimizer = paddle.optimizer.Adam(
-                learning_rate=lr_scheduler,
-                beta1=args.adam_beta1,
-                beta2=args.adam_beta2,
-                epsilon=args.adam_epsilon,
-                grad_clip=clip)
-            #optimizer = paddle.optimizer.AdamW(
+            #optimizer = paddle.optimizer.Adam(
             #    learning_rate=lr_scheduler,
             #    beta1=args.adam_beta1,
             #    beta2=args.adam_beta2,
             #    epsilon=args.adam_epsilon,
-            #    grad_clip=clip,
-            #    weight_decay=args.weight_decay,
-            #    apply_decay_param_fun=lambda x: x in decay_param)
-            ## alias
-            #optimizer.apply_optimize = optimizer._apply_optimize
+            #    grad_clip=clip)
+            optimizer = paddle.optimizer.AdamW(
+                learning_rate=lr_scheduler,
+                beta1=args.adam_beta1,
+                beta2=args.adam_beta2,
+                epsilon=args.adam_epsilon,
+                grad_clip=clip,
+                weight_decay=args.weight_decay,
+                apply_decay_param_fun=lambda x: x in decay_param)
+            # alias
+            optimizer.apply_optimize = optimizer._apply_optimize
 
             if args.use_recompute:
                 dist_strategy.recompute = True
@@ -437,6 +442,10 @@ def do_train(args):
         reader_start = time.time()
         #for step, batch in enumerate(train_data_loader()):
         while True:
+            #tokens = np.ones((args.global_batch_size, args.max_seq_len)).astype(np.int64)
+            #loss_mask = np.ones((args.global_batch_size, args.max_seq_len)).astype(np.float32)
+            #position_ids = np.ones((args.global_batch_size, args.max_seq_len)).astype(np.int64)
+            #labels = np.ones((args.global_batch_size, args.max_seq_len)).astype(np.int64)
             train_reader_cost += time.time() - reader_start
             train_start = time.time()
 
@@ -446,6 +455,11 @@ def do_train(args):
             ret = exe.run(main_program,
                           fetch_list=fetchs,
                           use_program_cache=True)
+            #ret = exe.run(main_program,
+            #              feed={"tokens": tokens, "loss_mask": loss_mask,
+            #              "position_ids": position_ids, "labels": labels},
+            #              fetch_list=fetchs,
+            #              use_program_cache=True)
             #ret = exe.run(main_program,
             #              feed=batch,
             #              fetch_list=fetchs,
@@ -509,7 +523,7 @@ def do_train(args):
                 tokenizer.save_pretrained(output_dir)
                 tic_train = time.time()
 
-            if global_step >= args.max_steps:
+                return
                 eval_fetch = []
                 if topo.is_last:
                     eval_fetch = [loss]

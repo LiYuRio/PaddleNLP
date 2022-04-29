@@ -24,6 +24,8 @@ from paddle.fluid import layers
 from paddle.nn.layer.transformer import _convert_param_attr_to_list
 from paddle.distributed.fleet import fleet
 import paddle.incubate as incubate
+from paddle.incubate.nn import FusedTransformerEncoderLayer, FusedMultiHeadAttention
+from paddle.incubate.nn import FusedFeedForward
 
 from paddlenlp.transformers import PretrainedModel, register_base_model
 import paddlenlp
@@ -368,69 +370,81 @@ class TransformerDecoderLayer(nn.Layer):
         weight_attrs = _convert_param_attr_to_list(weight_attr, 3)
         bias_attrs = _convert_param_attr_to_list(bias_attr, 3)
 
-        self.self_attn = MultiHeadAttention(
-            d_model,
-            nhead,
-            dropout=attn_dropout,
-            weight_attr=weight_attrs[0],
-            bias_attr=bias_attrs[0],
-            topo=topo)
-        if topo is None or topo.mp_info.size == 1:
-            self.linear1 = nn.Linear(
-                d_model,
-                dim_feedforward,
-                weight_attrs[2],
-                bias_attr=bias_attrs[2])
-            self.linear2 = nn.Linear(
-                dim_feedforward,
-                d_model,
-                weight_attrs[2],
-                bias_attr=bias_attrs[2])
-        else:
-            self.linear1 = paddlenlp.ops.ColumnParallelLiner(
-                (d_model, dim_feedforward),
-                topo.mp_info.size,
-                gather_out=False,
-                param_attr=weight_attrs[2],
-                bias_attr=bias_attrs[2])
-            self.linear2 = paddlenlp.ops.RowParallelLiner(
-                (dim_feedforward, d_model),
-                topo.mp_info.size,
-                input_is_parallel=True,
-                param_attr=weight_attrs[2],
-                bias_attr=bias_attrs[2])
+        self.self_attn = FusedMultiHeadAttention(
+          d_model,
+          nhead,
+          attn_dropout_rate=attn_dropout,
+          normalize_before=True,
+          weight_attr=weight_attrs[0],
+          bias_attr=bias_attrs[0])
+        self.ffn = FusedFeedForward(d_model, dim_feedforward, dropout_rate=dropout, activation="gelu",
+              act_dropout_rate=act_dropout, normalize_before=True,
+              weight_attr=weight_attrs[1], bias_attr=bias_attrs[1])
+        #self.self_attn = MultiHeadAttention(
+        #    d_model,
+        #    nhead,
+        #    dropout=attn_dropout,
+        #    weight_attr=weight_attrs[0],
+        #    bias_attr=bias_attrs[0],
+        #    topo=topo)
+        #if topo is None or topo.mp_info.size == 1:
+        #    self.linear1 = nn.Linear(
+        #        d_model,
+        #        dim_feedforward,
+        #        weight_attrs[2],
+        #        bias_attr=bias_attrs[2])
+        #    self.linear2 = nn.Linear(
+        #        dim_feedforward,
+        #        d_model,
+        #        weight_attrs[2],
+        #        bias_attr=bias_attrs[2])
+        #else:
+        #    self.linear1 = paddlenlp.ops.ColumnParallelLiner(
+        #        (d_model, dim_feedforward),
+        #        topo.mp_info.size,
+        #        gather_out=False,
+        #        param_attr=weight_attrs[2],
+        #        bias_attr=bias_attrs[2])
+        #    self.linear2 = paddlenlp.ops.RowParallelLiner(
+        #        (dim_feedforward, d_model),
+        #        topo.mp_info.size,
+        #        input_is_parallel=True,
+        #        param_attr=weight_attrs[2],
+        #        bias_attr=bias_attrs[2])
 
-        self.norm1 = nn.LayerNorm(d_model, epsilon=1e-5)
-        self.norm2 = nn.LayerNorm(d_model, epsilon=1e-5)
-        self.dropout1 = nn.Dropout(dropout, mode="upscale_in_train")
-        self.dropout2 = nn.Dropout(act_dropout, mode="upscale_in_train")
-        self.activation = getattr(F, activation)
+        #self.norm1 = nn.LayerNorm(d_model, epsilon=1e-5)
+        #self.norm2 = nn.LayerNorm(d_model, epsilon=1e-5)
+        #self.dropout1 = nn.Dropout(dropout, mode="upscale_in_train")
+        #self.dropout2 = nn.Dropout(act_dropout, mode="upscale_in_train")
+        #self.activation = getattr(F, activation)
 
     def forward(self, tgt, memory, tgt_mask=None, use_cache=False, cache=None):
-        residual = tgt
+        tgt = self.self_attn(tgt, tgt, tgt, tgt_mask, cache)
+        tgt = self.ffn(tgt)
+        #residual = tgt
 
-        if self.normalize_before:
-            tgt = self.norm1(tgt)
+        #if self.normalize_before:
+        #    tgt = self.norm1(tgt)
 
-        if use_cache is False:
-            tgt = self.self_attn(tgt, tgt, tgt, tgt_mask, use_cache, cache)
-        else:
-            tgt, incremental_cache = self.self_attn(tgt, tgt, tgt, tgt_mask,
-                                                    use_cache, cache)
-        tgt = residual + self.dropout1(tgt)
-        if not self.normalize_before:
-            tgt = self.norm1(tgt)
+        #if use_cache is False:
+        #    tgt = self.self_attn(tgt, tgt, tgt, tgt_mask, use_cache, cache)
+        #else:
+        #    tgt, incremental_cache = self.self_attn(tgt, tgt, tgt, tgt_mask,
+        #                                            use_cache, cache)
+        #tgt = residual + self.dropout1(tgt)
+        #if not self.normalize_before:
+        #    tgt = self.norm1(tgt)
 
-        residual = tgt
-        if self.normalize_before:
-            tgt = self.norm2(tgt)
-        tgt = self.dropout2(
-            self.linear2(F.gelu(
-                self.linear1(tgt), approximate=True)))
-        tgt = residual + tgt
+        #residual = tgt
+        #if self.normalize_before:
+        #    tgt = self.norm2(tgt)
+        #tgt = self.dropout2(
+        #    self.linear2(F.gelu(
+        #        self.linear1(tgt), approximate=True)))
+        #tgt = residual + tgt
 
-        if not self.normalize_before:
-            tgt = self.norm2(tgt)
+        #if not self.normalize_before:
+        #    tgt = self.norm2(tgt)
 
         return tgt if use_cache is False else (tgt, incremental_cache)
 

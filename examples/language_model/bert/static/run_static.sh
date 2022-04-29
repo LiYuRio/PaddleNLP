@@ -1,12 +1,12 @@
 #!/bin/bash
-export FLAGS_USE_STANDALONE_EXECUTOR=1
+#export FLAGS_USE_STANDALONE_EXECUTOR=1
 
 unset CUDA_VISIBLE_DEVICES
-python -m paddle.distributed.launch --gpus "3" run_pretrain.py \
+python3 -m paddle.distributed.launch --gpus "3" run_pretrain.py \
     --model_type bert \
-    --model_name_or_path bert-base-uncased \
-    --max_predictions_per_seq 512 \
-    --batch_size 4 \
+    --model_name_or_path bert-large-uncased \
+    --max_predictions_per_seq 76 \
+    --batch_size 8 \
     --learning_rate 1e-4 \
     --weight_decay 1e-2 \
     --adam_epsilon 1e-6 \
@@ -17,4 +17,4 @@ python -m paddle.distributed.launch --gpus "3" run_pretrain.py \
     --save_steps 20000 \
     --max_steps 1000000 \
     --device gpu \
-    --use_amp False 
+    --use_amp true 
